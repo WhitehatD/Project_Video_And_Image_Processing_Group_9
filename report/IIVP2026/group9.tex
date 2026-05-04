@@ -29,9 +29,9 @@
 % Replace StudentNameX with your full name. You can use spaces here.
 % Replace studentidX with your student id. Only the digits. Do not put i or I at the beginning!
 % Order of authors should be in alphebetical ordered by last name.
-\author[1]{Alexandru Cioc}
-\author[1]{V. Munoz}
-\author[1]{A. Visoiu}
+\author[1]{Alexandru Cioc}[orcid=6365661]
+\author[1]{V. Munoz}[orcid=6346464]
+\author[1]{A. Visoiu}[orcid=9999999]
 
 % Do not change!
 \affiliation[1]{organization={Department of Advanced Computing Sciences, Maastricht University},
@@ -66,12 +66,6 @@ The original classifier head is replaced with a dropout layer ($p = 0.3$) \citep
 \subsection{Input Preprocessing}
 
 The dataset contains $32 \times 32$ grayscale images. Since the pretrained backbone expects three-channel input, we replicate the grayscale channel across all three colour channels. Images are resized to $96 \times 96$ pixels with bilinear interpolation and normalised using the ImageNet channel statistics: mean $\mu = (0.485, 0.456, 0.406)$ and standard deviation $\sigma = (0.229, 0.224, 0.225)$.
-
-\begin{figure}
-    \centering
-    \includegraphics[width=0.45\linewidth]{Images/sample_grid.png}
-    \caption{Representative samples from the training set. Each group corresponds to one of the ten classes (0--9). The characters are handwritten symbols that can look visually similar across classes, which motivates the use of strong regularisation and ensemble methods.}
-\end{figure}
 
 \subsection{Data Augmentation}
 
@@ -121,5 +115,12 @@ At inference time, five forward passes are run per test image: one on the origin
 
 \bibliographystyle{cas-model2-names}
 \bibliography{references}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.4\linewidth]{Images/sample_grid.png}
+    \caption{Representative samples from the training set. Each row corresponds to one of the ten classes (0--9). The characters are handwritten symbols that can look visually similar across classes, which motivates the use of strong regularisation and ensemble methods.}
+    \label{fig:image}
+\end{figure}
 
 \end{document}
