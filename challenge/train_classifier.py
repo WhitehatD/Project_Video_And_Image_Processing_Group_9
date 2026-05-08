@@ -1,10 +1,3 @@
-"""
-IIVP 2026 Challenge — 10-class image classifier.
-
-Dataset: 32x32 grayscale images, 17,000 train (1700/class) + 3000 test.
-Approach: Custom compact CNN trained on CPU.
-"""
-
 import os
 import time
 import csv
@@ -17,7 +10,6 @@ from torch.utils.data import Dataset, DataLoader, random_split
 from torchvision import transforms
 from PIL import Image
 
-# --- Config ---
 DATA_DIR = Path("D:/playground/image-video-processing-course")
 TRAIN_DIR = DATA_DIR / "train" / "train"
 TEST_DIR = DATA_DIR / "test" / "test"
@@ -30,19 +22,16 @@ IMG_SIZE = 32
 BATCH = 256
 EPOCHS = 12
 LR = 1e-3
-NUM_WORKERS = 0  # Windows + small images: 0 is fine
+NUM_WORKERS = 0
 SEED = 42
 VAL_SPLIT = 0.1
 
 torch.manual_seed(SEED)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"[init] device={device} torch={torch.__version__}")
+print(f"device={device} torch={torch.__version__}")
 
 
-# --- Datasets ---
 class TrainDataset(Dataset):
-    """Reads images from class-subfolder structure (train/train/{0..9}/*.png)."""
-
     def __init__(self, root: Path, transform=None):
         self.transform = transform
         self.samples = []
@@ -59,22 +48,20 @@ class TrainDataset(Dataset):
 
     def __getitem__(self, i):
         path, label = self.samples[i]
-        img = Image.open(path).convert("L")  # grayscale
+        img = Image.open(path).convert("L")
         if self.transform:
             img = self.transform(img)
         return img, label
 
 
 class TestDataset(Dataset):
-    """Reads test images by Id from a CSV manifest."""
-
     def __init__(self, csv_path: Path, root: Path, transform=None):
         self.transform = transform
         self.root = root
         self.ids = []
         with open(csv_path, "r") as f:
             reader = csv.reader(f)
-            next(reader)  # header
+            next(reader)
             for row in reader:
                 self.ids.append(int(row[0]))
 
@@ -89,11 +76,10 @@ class TestDataset(Dataset):
         return img, img_id
 
 
-# --- Transforms ---
 train_tf = transforms.Compose([
     transforms.RandomCrop(IMG_SIZE, padding=4),
     transforms.RandomHorizontalFlip(),
-    transforms.ToTensor(),  # [0,1], shape (1,32,32)
+    transforms.ToTensor(),
     transforms.Normalize(mean=[0.5], std=[0.5]),
 ])
 
@@ -103,26 +89,22 @@ eval_tf = transforms.Compose([
 ])
 
 
-# --- Model: Compact CNN tuned for 32x32 grayscale ---
 class CompactCNN(nn.Module):
     def __init__(self, num_classes=10):
         super().__init__()
         self.features = nn.Sequential(
-            # block 1: 32x32 -> 32x32 -> 16x16
             nn.Conv2d(1, 64, 3, padding=1, bias=False),
             nn.BatchNorm2d(64), nn.ReLU(inplace=True),
             nn.Conv2d(64, 64, 3, padding=1, bias=False),
             nn.BatchNorm2d(64), nn.ReLU(inplace=True),
             nn.MaxPool2d(2),
 
-            # block 2: 16x16 -> 16x16 -> 8x8
             nn.Conv2d(64, 128, 3, padding=1, bias=False),
             nn.BatchNorm2d(128), nn.ReLU(inplace=True),
             nn.Conv2d(128, 128, 3, padding=1, bias=False),
             nn.BatchNorm2d(128), nn.ReLU(inplace=True),
             nn.MaxPool2d(2),
 
-            # block 3: 8x8 -> 8x8 -> 4x4
             nn.Conv2d(128, 256, 3, padding=1, bias=False),
             nn.BatchNorm2d(256), nn.ReLU(inplace=True),
             nn.Conv2d(256, 256, 3, padding=1, bias=False),
@@ -187,10 +169,9 @@ def predict(model, loader):
 
 
 def main():
-    # Build datasets
-    print("[data] loading train index...")
+    print("loading train data...")
     full_train = TrainDataset(TRAIN_DIR, transform=train_tf)
-    print(f"[data] full train: {len(full_train)} samples")
+    print(f"total samples: {len(full_train)}")
 
     n_val = int(len(full_train) * VAL_SPLIT)
     n_train = len(full_train) - n_val
@@ -198,28 +179,19 @@ def main():
         full_train, [n_train, n_val],
         generator=torch.Generator().manual_seed(SEED),
     )
-    # Override val transform (no augmentation)
-    val_set.dataset_eval_tf = eval_tf  # not used directly; we wrap below
 
-    # Quick-and-clean approach: build a separate eval-tf dataset for val
     eval_full = TrainDataset(TRAIN_DIR, transform=eval_tf)
-    val_indices = val_set.indices
-    val_set_eval = torch.utils.data.Subset(eval_full, val_indices)
+    val_set_eval = torch.utils.data.Subset(eval_full, val_set.indices)
 
-    train_loader = DataLoader(train_set, batch_size=BATCH, shuffle=True,
-                              num_workers=NUM_WORKERS, pin_memory=False)
-    val_loader = DataLoader(val_set_eval, batch_size=BATCH, shuffle=False,
-                            num_workers=NUM_WORKERS, pin_memory=False)
+    train_loader = DataLoader(train_set, batch_size=BATCH, shuffle=True, num_workers=NUM_WORKERS)
+    val_loader = DataLoader(val_set_eval, batch_size=BATCH, shuffle=False, num_workers=NUM_WORKERS)
 
     test_set = TestDataset(TEST_CSV, TEST_DIR, transform=eval_tf)
-    test_loader = DataLoader(test_set, batch_size=BATCH, shuffle=False,
-                             num_workers=NUM_WORKERS, pin_memory=False)
-    print(f"[data] train={len(train_set)} val={len(val_set_eval)} test={len(test_set)}")
+    test_loader = DataLoader(test_set, batch_size=BATCH, shuffle=False, num_workers=NUM_WORKERS)
+    print(f"train={len(train_set)} val={len(val_set_eval)} test={len(test_set)}")
 
-    # Model + opt
     model = CompactCNN(NUM_CLASSES).to(device)
-    n_params = sum(p.numel() for p in model.parameters())
-    print(f"[model] CompactCNN params={n_params:,}")
+    print(f"params={sum(p.numel() for p in model.parameters()):,}")
 
     loss_fn = nn.CrossEntropyLoss()
     opt = optim.AdamW(model.parameters(), lr=LR, weight_decay=5e-4)
@@ -230,16 +202,13 @@ def main():
         tr_loss, tr_acc, dt = train_one_epoch(model, train_loader, opt, loss_fn, epoch)
         val_loss, val_acc = evaluate(model, val_loader, loss_fn)
         sched.step()
-        print(f"[epoch {epoch}/{EPOCHS}] train_loss={tr_loss:.4f} train_acc={tr_acc:.4f} "
-              f"| val_loss={val_loss:.4f} val_acc={val_acc:.4f} | {dt:.1f}s")
+        print(f"[{epoch}/{EPOCHS}] train={tr_acc:.4f} val={val_acc:.4f} {dt:.1f}s")
         if val_acc > best_val:
             best_val = val_acc
             torch.save(model.state_dict(), CKPT)
-            print(f"  -> saved best ({best_val:.4f})")
+            print(f"  saved ({best_val:.4f})")
 
-    # Load best, predict
     model.load_state_dict(torch.load(CKPT, map_location=device))
-    print(f"[predict] best val_acc={best_val:.4f}")
     preds = predict(model, test_loader)
 
     with open(OUT_CSV, "w", newline="") as f:
@@ -247,7 +216,7 @@ def main():
         w.writerow(["Id", "Category"])
         for img_id, cat in preds:
             w.writerow([img_id, cat])
-    print(f"[done] wrote {OUT_CSV}  ({len(preds)} rows)")
+    print(f"wrote {OUT_CSV} ({len(preds)} rows)")
 
 
 if __name__ == "__main__":

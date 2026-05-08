@@ -1,17 +1,3 @@
-"""
-IIVP 2026 Challenge — High-Accuracy Solution.
-
-Strategy:
-  - EfficientNet-B0 pretrained on ImageNet (fine-tuned)
-  - 32x32 grayscale → replicate to 3ch → resize to 64x64
-  - Strong augmentation: RandomRotation, Affine, Perspective, RandomErasing
-  - Mixup (alpha=0.3) during training
-  - Label smoothing 0.1
-  - AdamW + CosineAnnealingWarmRestarts (warmup 3 epochs)
-  - 40 epochs per seed, 3 seeds → ensemble vote on test set
-  - TTA at inference: original + 4 slightly-rotated passes averaged
-"""
-
 import argparse
 import csv
 import os
@@ -23,13 +9,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader, random_split, Subset
+from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms, models
 from PIL import Image
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
 parser = argparse.ArgumentParser()
 parser.add_argument("--data-dir", default=None)
 parser.add_argument("--epochs", type=int, default=40)
@@ -37,9 +20,9 @@ parser.add_argument("--batch", type=int, default=256)
 parser.add_argument("--lr", type=float, default=5e-4)
 parser.add_argument("--seeds", nargs="+", type=int, default=[42, 123, 456])
 parser.add_argument("--img-size", type=int, default=96)
-parser.add_argument("--tta-n", type=int, default=5, help="TTA passes")
-parser.add_argument("--workers", type=int, default=0)  # data in RAM, workers not needed
-parser.add_argument("--amp", action="store_true", help="Use mixed-precision (CUDA only)")
+parser.add_argument("--tta-n", type=int, default=5)
+parser.add_argument("--workers", type=int, default=0)
+parser.add_argument("--amp", action="store_true")
 args = parser.parse_args()
 
 _default = os.environ.get("IIVP_DATA_DIR") or str(Path(__file__).resolve().parent)
@@ -64,23 +47,17 @@ USE_AMP = args.amp
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 if device.type == "cuda" and not USE_AMP:
-    USE_AMP = True  # always use AMP on CUDA for speed
+    USE_AMP = True
 scaler = torch.amp.GradScaler("cuda", enabled=USE_AMP and device.type == "cuda")
-print(f"[config] device={device} img={IMG_SIZE} batch={BATCH} epochs={EPOCHS} "
-      f"seeds={SEEDS} amp={USE_AMP}", flush=True)
+print(f"device={device} img={IMG_SIZE} batch={BATCH} epochs={EPOCHS} seeds={SEEDS} amp={USE_AMP}", flush=True)
 
 
-# ---------------------------------------------------------------------------
-# Dataset
-# ---------------------------------------------------------------------------
 class TrainDS(Dataset):
-    """Loads all train images into RAM on first construction — zero disk I/O during training."""
-
     def __init__(self, root: Path, tf=None):
         self.tf = tf
-        self.images: list[Image.Image] = []  # PIL images in RAM
-        self.labels: list[int] = []
-        print("[data] preloading train images into RAM...", flush=True)
+        self.images = []
+        self.labels = []
+        print("loading train images...", flush=True)
         for cls_dir in sorted(root.iterdir()):
             if not cls_dir.is_dir():
                 continue
@@ -88,10 +65,10 @@ class TrainDS(Dataset):
             for p in sorted(cls_dir.iterdir()):
                 if p.suffix.lower() == ".png":
                     img = Image.open(p).convert("RGB")
-                    img.load()  # force decode into memory
+                    img.load()
                     self.images.append(img)
                     self.labels.append(lbl)
-        print(f"[data] {len(self.images)} images in RAM", flush=True)
+        print(f"{len(self.images)} images loaded", flush=True)
 
     def __len__(self):
         return len(self.images)
@@ -104,23 +81,21 @@ class TrainDS(Dataset):
 
 
 class TestDS(Dataset):
-    """Loads all test images into RAM."""
-
     def __init__(self, csv_path: Path, root: Path, tf=None):
         self.tf = tf
         self.ids = []
-        self.images: list[Image.Image] = []
+        self.images = []
         with open(csv_path) as f:
             r = csv.reader(f)
             next(r)
             for row in r:
                 self.ids.append(int(row[0]))
-        print("[data] preloading test images into RAM...", flush=True)
+        print("loading test images...", flush=True)
         for img_id in self.ids:
             img = Image.open(root / f"{img_id}.png").convert("RGB")
             img.load()
             self.images.append(img)
-        print(f"[data] {len(self.images)} test images in RAM", flush=True)
+        print(f"{len(self.images)} test images loaded", flush=True)
 
     def __len__(self):
         return len(self.ids)
@@ -132,9 +107,7 @@ class TestDS(Dataset):
         return img, self.ids[i]
 
 
-# ---------------------------------------------------------------------------
-# Transforms — ImageNet stats for pretrained model
-# ---------------------------------------------------------------------------
+# ImageNet normalization stats for the pretrained model
 MEAN = [0.485, 0.456, 0.406]
 STD  = [0.229, 0.224, 0.225]
 
@@ -154,8 +127,8 @@ eval_tf = transforms.Compose([
     transforms.Normalize(MEAN, STD),
 ])
 
-# TTA transforms: original + small rotations
-def tta_tfs(n: int, img_size: int):
+
+def tta_tfs(n, img_size):
     angles = [0, 8, -8, 15, -15][:n]
     tfs = []
     for angle in angles:
@@ -164,16 +137,13 @@ def tta_tfs(n: int, img_size: int):
         else:
             tfs.append(transforms.Compose([
                 transforms.Resize((img_size, img_size)),
-                transforms.RandomRotation((angle, angle)),  # deterministic rotation
+                transforms.RandomRotation((angle, angle)),
                 transforms.ToTensor(),
                 transforms.Normalize(MEAN, STD),
             ]))
     return tfs
 
 
-# ---------------------------------------------------------------------------
-# Model — EfficientNet-B0 pretrained, replace head
-# ---------------------------------------------------------------------------
 def build_model():
     m = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.DEFAULT)
     in_features = m.classifier[1].in_features
@@ -184,9 +154,6 @@ def build_model():
     return m.to(device)
 
 
-# ---------------------------------------------------------------------------
-# Mixup
-# ---------------------------------------------------------------------------
 def mixup_data(x, y, alpha=0.3):
     if alpha <= 0:
         return x, y, y, 1.0
@@ -199,16 +166,12 @@ def mixup_loss(criterion, preds, y_a, y_b, lam):
     return lam * criterion(preds, y_a) + (1 - lam) * criterion(preds, y_b)
 
 
-# ---------------------------------------------------------------------------
-# Training
-# ---------------------------------------------------------------------------
 def train_one_epoch(model, loader, opt, criterion, sched_warmup, epoch):
     model.train()
     tot, correct, loss_sum = 0, 0, 0.0
     t0 = time.time()
     for i, (x, y) in enumerate(loader):
         x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
-        # Warmup LR
         if sched_warmup and epoch <= WARMUP_EPOCHS:
             step = (epoch - 1) * len(loader) + i
             lr_scale = min(1.0, (step + 1) / (WARMUP_EPOCHS * len(loader)))
@@ -249,17 +212,12 @@ def evaluate(model, loader, criterion):
     return loss_sum / tot, correct / tot
 
 
-# ---------------------------------------------------------------------------
-# TTA Inference
-# ---------------------------------------------------------------------------
 @torch.no_grad()
-def predict_tta(model, base_test_ds: TestDS, n=5):
-    """Run TTA inference by applying different transforms to the preloaded image set."""
+def predict_tta(model, base_test_ds, n=5):
     model.eval()
     tta_transforms = tta_tfs(n, IMG_SIZE)
-    all_probs = None  # (N, C)
+    all_probs = None
     for tta_idx, tf in enumerate(tta_transforms):
-        # Temporarily override the transform
         orig_tf = base_test_ds.tf
         base_test_ds.tf = tf
         pm = device.type == "cuda"
@@ -274,17 +232,13 @@ def predict_tta(model, base_test_ds: TestDS, n=5):
         base_test_ds.tf = orig_tf
         probs_pass = torch.cat(probs_list, dim=0)
         all_probs = probs_pass if all_probs is None else all_probs + probs_pass
-        print(f"  TTA pass {tta_idx+1}/{n} done", flush=True)
+        print(f"TTA pass {tta_idx+1}/{n} done", flush=True)
     all_probs /= n
     return all_probs.argmax(1).tolist(), all_probs
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 class AugWrapper(Dataset):
-    """Wraps a preloaded TrainDS subset and applies a different transform."""
-    def __init__(self, base_ds: TrainDS, indices: list[int], tf):
+    def __init__(self, base_ds, indices, tf):
         self.base = base_ds
         self.indices = indices
         self.tf = tf
@@ -299,28 +253,22 @@ class AugWrapper(Dataset):
 
 
 def main():
-    print(f"[data] preloading all images once...", flush=True)
-    # Load raw PIL images once (no transform — transforms applied in AugWrapper)
-    base_ds = TrainDS(TRAIN_DIR, tf=None)   # images stored as PIL
+    base_ds = TrainDS(TRAIN_DIR, tf=None)
     n_val = int(len(base_ds) * VAL_SPLIT)
     n_train = len(base_ds) - n_val
 
-    # Preload test images once
     test_ds_base = TestDS(TEST_CSV, TEST_DIR, tf=eval_tf)
     test_ids = test_ds_base.ids
-    print(f"[data] train={n_train} val={n_val} test={len(test_ids)}", flush=True)
+    print(f"train={n_train} val={n_val} test={len(test_ids)}", flush=True)
 
     criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTH)
-    ensemble_probs = None  # (N_test, C)
+    ensemble_probs = None
 
     for seed in SEEDS:
-        print(f"\n{'='*60}", flush=True)
-        print(f" SEED {seed}", flush=True)
-        print(f"{'='*60}", flush=True)
+        print(f"\n--- seed {seed} ---", flush=True)
         random.seed(seed)
         torch.manual_seed(seed)
 
-        gen = torch.Generator().manual_seed(seed)
         all_idx = list(range(len(base_ds)))
         random.shuffle(all_idx)
         train_idx = all_idx[:n_train]
@@ -336,8 +284,7 @@ def main():
                                 num_workers=NUM_WORKERS, pin_memory=pm)
 
         model = build_model()
-        n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"[model] EfficientNet-B0 params={n_params:,}", flush=True)
+        print(f"params={sum(p.numel() for p in model.parameters() if p.requires_grad):,}", flush=True)
 
         opt = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
         sched = optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, EPOCHS - WARMUP_EPOCHS),
@@ -355,31 +302,27 @@ def main():
                 sched.step()
 
             lr_now = opt.param_groups[0]["lr"]
-            print(f"[{seed}][{epoch}/{EPOCHS}] tr={tr_acc:.4f} val={val_acc:.4f} "
-                  f"tr_loss={tr_loss:.4f} val_loss={val_loss:.4f} lr={lr_now:.2e} {dt:.1f}s",
-                  flush=True)
+            print(f"[{epoch}/{EPOCHS}] tr={tr_acc:.4f} val={val_acc:.4f} "
+                  f"loss={tr_loss:.4f}/{val_loss:.4f} lr={lr_now:.2e} {dt:.1f}s", flush=True)
             if val_acc > best_val:
                 best_val = val_acc
                 torch.save(model.state_dict(), ckpt_path)
-                print(f"  -> checkpoint saved ({best_val:.4f})", flush=True)
 
-        print(f"[{seed}] best val_acc={best_val:.4f}", flush=True)
+        print(f"seed {seed} best val={best_val:.4f}", flush=True)
 
         model.load_state_dict(torch.load(ckpt_path, map_location=device))
-        print(f"[{seed}] TTA inference ({TTA_N} passes)...", flush=True)
         preds, probs = predict_tta(model, test_ds_base, n=TTA_N)
         ensemble_probs = probs if ensemble_probs is None else ensemble_probs + probs
 
     ensemble_probs /= len(SEEDS)
     final_preds = ensemble_probs.argmax(1).tolist()
-    print(f"\n[ensemble] {len(SEEDS)} seeds, final predictions ready", flush=True)
 
     with open(OUT_CSV, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["Id", "Category"])
         for img_id, cat in zip(test_ids, final_preds):
             w.writerow([img_id, cat])
-    print(f"[done] {OUT_CSV}  ({len(final_preds)} rows)", flush=True)
+    print(f"done — {OUT_CSV} ({len(final_preds)} rows)", flush=True)
 
 
 if __name__ == "__main__":
